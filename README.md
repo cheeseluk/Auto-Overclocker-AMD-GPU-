@@ -6,17 +6,18 @@ An automation framework that uses Bayesian optimization (Optuna) and AMD's nativ
 ## Demo
 
 
-https://github.com/user-attachments/assets/28f10ea2-c3ab-4d4f-afee-2121a48bb5d5
+https://github.com/user-attachments/assets/07a02114-558f-488d-a253-9919ee771674
 
 
 A video demo of the program recovering from a crash, setting gpu parameters, running a benchmark, logging results, and deciding the next test gpu parameters. [Youtube link](https://youtu.be/YyaOEYRJmVg) higher quality and longer demo.
 
 <img width="1045" height="880" alt="optimization_history" src="https://github.com/user-attachments/assets/8d365d1f-1056-4f1c-b0d6-0e4b580a4f8e" />
 
+
+
+
 50 trials of the Optuna sampler searching the clock/voltage space (note that the 0th trial is a default configuration/baseline run). The gif shows every trial's avg/min FPS (faint dots), a red step-line tracking the best-so-far trial by composite score, and red X's marking trials that crashed the system before producing a benchmark. The overclock
 
-[![Watch the video](https://img.youtube.com/vi/YyaOEYRJmVg/maxresdefault.jpg)](https://youtu.be/YyaOEYRJmVg)
-A video demo of the program recovering from a crash, setting gpu parameters, running a benchmark, logging results, and deciding the next test gpu parameters. 
 
 ---
 
