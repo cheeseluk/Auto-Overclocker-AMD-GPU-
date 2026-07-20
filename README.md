@@ -10,8 +10,7 @@ An automation framework that uses Bayesian optimization (Optuna) and AMD's nativ
 50 trials of the Optuna sampler searching the clock/voltage space (note that the 0th trial is a default configuration/baseline run). The gif shows every trial's avg/min FPS (faint dots), a red step-line tracking the best-so-far trial by composite score, and red X's marking trials that crashed the system before producing a benchmark. The overclock
 
 [![Watch the video](https://img.youtube.com/vi/YyaOEYRJmVg/maxresdefault.jpg)](https://youtu.be/YyaOEYRJmVg)
-A video demo of the program recovering fr<img width="2720" height="2440" alt="gpu_overclocker_architecture" src="https://github.com/user-attachments/assets/b73d1622-fcdf-4430-bf54-ef455f6adb6f" />
-om a crash, setting gpu parameters, running a benchmark, logging results, and deciding the next test gpu parameters. 
+A video demo of the program recovering from a crash, setting gpu parameters, running a benchmark, logging results, and deciding the next test gpu parameters. 
 
 ---
 
