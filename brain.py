@@ -54,7 +54,7 @@ def check_previous_crash(study):
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
-            
+        # Search state.json
         if state.get("status") == "pending":
             print("\n[WATCHDOG] 🚨 FATAL CRASH DETECTED ON PREVIOUS RUN!")
             print(f"[WATCHDOG] Penalizing dangerous settings: {state['params']}")
