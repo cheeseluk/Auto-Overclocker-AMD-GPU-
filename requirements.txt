@@ -1,0 +1,9 @@
+# Bayesian optimization controller -- required to run the tuning loop.
+# Pulls in numpy, sqlalchemy, alembic, colorlog, packaging, PyYAML and tqdm
+# as transitive dependencies -- no need to list them here.
+optuna>=3.6
+ 
+# Chart / GIF generation (tools/). Not needed to run the tuning loop itself.
+matplotlib>=3.8
+imageio>=2.34
+ 
