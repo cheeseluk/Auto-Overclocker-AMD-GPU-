@@ -1,0 +1,22 @@
+{
+  "paths": {
+    "cpp_executable": "./hardware_set.exe",
+    "cp2077_exe": "C:/Program Files (x86)/Steam/steamapps/common/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe",
+    "cp2077_dir": "C:/Program Files (x86)/Steam/steamapps/common/Cyberpunk 2077/bin/x64",
+    "bench_dir": "C:/Users/<YOUR_USERNAME>/Documents/CD Projekt Red/Cyberpunk 2077/benchmarkResults"
+  },
+  "tuning": {
+    "crash_penalty": -10000,
+    "voltage_penalty_weight": 0.05
+  },
+  "params": {
+    "voltage_offset_min": -50,
+    "voltage_offset_max": 0,
+    "power_percentage_offset_min": 0,
+    "power_percentage_offset_max": 5,
+    "memory_freq_min": 2550,
+    "memory_freq_max": 2650,
+    "gpu_freq_min": 2600,
+    "gpu_freq_max": 3000
+  }
+}
