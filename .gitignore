@@ -432,3 +432,23 @@ FodyWeavers.xsd
 x64/
 state.json
 config.json
+
+# ===== Project-specific =====
+
+# AMD ADLX SDK - not redistributed; see README for setup
+SDK/
+
+# Optuna study database (machine-specific tuning results)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Benchmark output
+*.csv
+results/
+logs/

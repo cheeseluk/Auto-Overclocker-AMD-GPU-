@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "cppbuild",
+      "label": "Build hardware_set",
+      "command": "cl.exe",
+      "args": [
+        "/Zi",
+        "/EHsc",
+        "/nologo",
+        "/I${workspaceFolder}",
+        "/Fe${workspaceFolder}\\hardware_set.exe",
+        "${workspaceFolder}\\hardware_set.cpp",
+        "${workspaceFolder}\\SDK\\ADLXHelper\\Windows\\Cpp\\ADLXHelper.cpp",
+        "${workspaceFolder}\\SDK\\Platform\\Windows\\WinAPIs.cpp"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$msCompile"],
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}
