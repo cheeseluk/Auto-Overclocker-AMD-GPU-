@@ -1,6 +1,6 @@
 {
   "paths": {
-    "cpp_executable": "C:/path/to/AutoOverclocker/x64/Release/AutoOverclocker.exe",
+    "cpp_executable": "./hardware_set.exe",
     "cp2077_exe": "C:/Program Files (x86)/Steam/steamapps/common/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe",
     "cp2077_dir": "C:/Program Files (x86)/Steam/steamapps/common/Cyberpunk 2077/bin/x64",
     "bench_dir": "C:/Users/<YOUR_USERNAME>/Documents/CD Projekt Red/Cyberpunk 2077/benchmarkResults"
