@@ -16,7 +16,7 @@ A video demo of the program recovering from a crash, setting gpu parameters, run
 
 
 
-50 trials of the Optuna sampler searching the clock/voltage space (note that the 0th trial is a default configuration/baseline run). The gif shows every trial's avg/min FPS (faint dots), a red step-line tracking the best-so-far trial by composite score, and red X's marking trials that crashed the system before producing a benchmark. <!-- TODO: this sentence was cut off in the draft -- finish or delete: "The overclock" -->
+50 trials of the Optuna sampler searching the clock/voltage space (note that the 0th trial is a default configuration/baseline run). The gif shows every trial's avg/min FPS (faint dots), a red step-line tracking the best-so-far trial by composite score, and red X's marking trials that crashed the system before producing a benchmark. The best overclocking parameters so far are shown at the bottom of the gif. Note that mem timing corresponds to the memory timing of the VRAM with 1 indicating fast timing and 0 indicating default timing.
 
 
 ---
@@ -60,6 +60,7 @@ The system separates concerns into a high-level ML controller and a low-level ha
 - **Hardware Interface:** C++, [AMD ADLX SDK](https://gpuopen.com/adlx/)
 - **Benchmark Harness:** Python, Cyberpunk 2077 automated benchmark capture
 - **Persistence / Crash Recovery:** `state.json` state machine, SQLite (Optuna `sqlite:///overclock_study.db` storage — trial-by-trial writes mean the study survives a BSOD even if the live dashboard capture doesn't)
+- **Visualization:** matplotlib + imageio, replaying the study database into animated history and Pareto-frontier GIFs after the fact
 - **Platform:** Windows, AMD RDNA GPUs
 
 ---
@@ -231,7 +232,39 @@ but not yet implemented.
 
 ---
 
-## Safety & Crash Resilience
+## Building the charts
+
+The two GIFs at the top of this README are generated from `overclock_study.db` after a
+run — nothing needs to be captured live. Because Optuna writes to SQLite trial-by-trial,
+the study survives a BSOD even when a live screen capture doesn't, so these can be
+rebuilt from a run that crashed halfway through.
+
+```bash
+python tools/rebuild_history_gif.py    # -> optimization_history.gif
+python tools/pareto_history_gif.py     # -> pareto_front.gif
+```
+
+Both read the study directly and animate it one trial at a time. Frames are written to
+`history_frames/` and `pareto_frames/` respectively (cleared on each run), then assembled
+into a GIF. Edit the `CONFIG` block at the top of either file to change the study name,
+frame rate, or output path.
+
+| Script | Shows |
+|---|---|
+| `rebuild_history_gif.py` | Per-trial avg/min FPS, a step-line tracking the best trial so far by composite score, crash markers, and a live "current best configuration" card |
+| `pareto_history_gif.py` | The score vs. \|voltage offset\| frontier filling in trial by trial, with dominated trials fading to gray |
+
+Both scripts skip trials that are neither a recorded crash nor a completed benchmark, so
+leftover `RUNNING` rows from an interrupted session don't appear as gaps.
+
+**Note:** the best trial is ranked by composite score, not raw average FPS. A trial can
+plot a higher FPS dot than the best-so-far line and still not be the leader — that's the
+voltage penalty doing its job, not a bug.
+
+These scripts need `matplotlib` and `imageio`, which are in `requirements.txt` but aren't
+required to run the tuning loop itself.
+
+---
 
 ⚠️ **This tool intentionally pushes GPU hardware past its stable operating envelope.** System freezes and BSODs are an expected, designed-for part of the search process, not a bug.
 
