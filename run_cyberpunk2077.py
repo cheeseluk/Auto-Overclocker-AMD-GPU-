@@ -27,7 +27,6 @@ def run_cyberpunk2077():
     os.makedirs(bench_dir, exist_ok=True)
 
     # --- 2. EXECUTE THE BENCHMARK ---
-    # Notes: True CLI syntax uses flags without values for flags like -benchmark and -bNoUserProfiles
     args = [
         executable,
         "-benchmark",
@@ -67,7 +66,7 @@ def run_cyberpunk2077():
 
     if not found_files:
         print("Error: Cyberpunk finished but no 'summary.json' telemetry file was created.")
-        return 0.0
+        return (0.0, 0.0)
 
     target_json_path = found_files[0]
     print(f"Found runtime telemetry file at: {target_json_path}")
@@ -89,7 +88,7 @@ def run_cyberpunk2077():
 
     except (KeyError, json.JSONDecodeError) as e:
         print(f"Error reading or parsing target metrics out of telemetry file: {e}")
-        return 0.0
+        return (0.0, 0.0)
 
 if __name__ == "__main__":
     # Test execution execution trace

@@ -16,7 +16,7 @@
     "power_percentage_offset_max": 5,
     "memory_freq_min": 2550,
     "memory_freq_max": 2650,
-    "gpu_freq_min": 2600,
-    "gpu_freq_max": 3000
+    "gpu_freq_min": 0,
+    "gpu_freq_max": 400
   }
 }

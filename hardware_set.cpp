@@ -1,56 +1,158 @@
 //
 //-------------------------------------------------------------------------------------------------
+// apply_tuning.cpp — applies one Optuna trial's GPU settings via ADLX.
+//
+// Error-handling design:
+//   * Every failure maps to ONE exit code that tells brain.py what to do next
+//     (fix the caller, prune the trial, penalize the trial, or stop the study).
+//   * Two phases: validate everything first (nothing written), then apply.
+//     An out-of-range value can never leave the GPU half-configured.
+//   * Any failure during the apply phase rolls back to factory defaults; if the
+//     rollback itself fails, that gets its own "stop everything" code.
+//   * ADLX Terminate() happens exactly once, via RAII, after all ADLX smart
+//     pointers have been released.
+//-------------------------------------------------------------------------------------------------
 
 #include "SDK/ADLXHelper/Windows/Cpp/ADLXHelper.h"
 #include "SDK/Include/IGPUManualGFXTuning.h"
 #include "SDK/Include/IGPUManualPowerTuning.h"
 #include "SDK/Include/IGPUManualVRAMTuning.h"
 #include "SDK/Include/IGPUTuning.h"
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
+#include <sstream>
 #include <string>
 
-// Use ADLX namespace
 using namespace adlx;
 
-// ADLXHelper instance
 static ADLXHelper g_ADLXHelp;
 
-int main(int argc, char* argv[])
+// =======================================================
+// Exit-code contract with brain.py
+// =======================================================
+enum class Exit : int
 {
-    // 1. Check if Python provided all 5 arguments
-    if (argc < 6)
+    Ok             = 0,
+
+    BadArgs        = 10, // caller bug (wrong argc / non-integer) -> fix brain.py, stop study
+
+    AdlxInit       = 20, // environment problem  -> stop study
+    NoGpu          = 21, //                      -> stop study
+    Unsupported    = 22, // GPU lacks a feature  -> stop study, fix search space
+
+    OutOfRange     = 30, // value outside driver range, NOTHING applied -> prune trial
+
+    Rejected       = 40, // driver refused a value, rolled back to factory -> fail/penalize trial
+    ResetNeeded    = 41, // driver asked for reset, rolled back to factory -> fail/penalize trial
+
+    RollbackFailed = 50, // GPU state unknown -> stop study immediately
+    Internal       = 60, // unexpected C++ exception -> stop study
+};
+
+struct TuneError
+{
+    Exit code;
+    std::string msg;
+};
+
+[[noreturn]] static void fail(Exit code, const std::string& msg)
+{
+    throw TuneError{ code, msg };
+}
+
+// Turns an ADLX_RESULT into a TuneError. Use for reads/queries (never for applying values).
+static void require(ADLX_RESULT r, Exit code, const std::string& what)
+{
+    if (ADLX_FAILED(r))
     {
-        std::cerr << "Usage: " << argv[0] << " <max_gpu_freq> <mem_freq> <mem_timing(0/1)> <power_limit> <voltage>" << std::endl;
-        return 1; // Return failure to Optuna
+        std::ostringstream m;
+        m << what << " failed (ADLX_RESULT " << r << ")";
+        fail(code, m.str());
+    }
+}
+
+// =======================================================
+// Argument parsing (std::stoi throws on bad input and would crash the process)
+// =======================================================
+struct Targets
+{
+    int coreMHz;
+    int memMHz;
+    int fastTiming;  // 0 = default, 1 = fast
+    int powerLimit;
+    int voltageMv;
+};
+
+static int parseInt(const char* s, const char* name)
+{
+    errno = 0;
+    char* end = nullptr;
+    long v = std::strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX)
+        fail(Exit::BadArgs, std::string("Invalid integer for ") + name + ": '" + s + "'");
+    return static_cast<int>(v);
+}
+
+static Targets parseArgs(int argc, char* argv[])
+{
+    if (argc != 6)
+    {
+        std::ostringstream m;
+        m << "Expected 5 arguments, got " << (argc - 1)
+          << ". Usage: " << argv[0]
+          << " <max_gpu_freq> <mem_freq> <mem_timing(0/1)> <power_limit> <voltage>";
+        fail(Exit::BadArgs, m.str());
     }
 
-    // Parse the inputs from brain.py
-    int target_max_freq = std::stoi(argv[1]);
-    int target_mem_freq = std::stoi(argv[2]);
-    int target_mem_timing = std::stoi(argv[3]); // 0 = Default, 1 = Fast Timing
-    int target_power_limit = std::stoi(argv[4]);
-    int target_voltage = std::stoi(argv[5]);
+    Targets t{};
+    t.coreMHz    = parseInt(argv[1], "max_gpu_freq");
+    t.memMHz     = parseInt(argv[2], "mem_freq");
+    t.fastTiming = parseInt(argv[3], "mem_timing");
+    t.powerLimit = parseInt(argv[4], "power_limit");
+    t.voltageMv  = parseInt(argv[5], "voltage");
 
-    std::cout << "Target -> Core: " << target_max_freq << "MHz, VRAM: " << target_mem_freq
-        << "MHz, Timing: " << (target_mem_timing == 1 ? "Fast" : "Default")
-        << ", Power: " << target_power_limit << ", Voltage: " << target_voltage << "mV" << std::endl;
+    if (t.fastTiming != 0 && t.fastTiming != 1)
+        fail(Exit::BadArgs, "mem_timing must be 0 or 1");
 
-    // 2. Initialize ADLX
-    ADLX_RESULT res = g_ADLXHelp.Initialize();
-    if (ADLX_FAILED(res)) return 1;
+    return t;
+}
 
-    // 3. Get the GPU Tuning Service
-    IADLXGPUTuningServicesPtr gpuTuningService;
-    res = g_ADLXHelp.GetSystemServices()->GetGPUTuningServices(&gpuTuningService);
-    if (ADLX_FAILED(res)) { g_ADLXHelp.Terminate(); return 1; }
+// =======================================================
+// Validation helpers
+// =======================================================
+static void checkRange(const char* name, int value, const ADLX_IntRange& r)
+{
+    if (value < r.minValue || value > r.maxValue)
+    {
+        std::ostringstream m;
+        m << name << " = " << value << " is outside the driver range ["
+          << r.minValue << ", " << r.maxValue << "]";
+        fail(Exit::OutOfRange, m.str());
+    }
+    if (r.step > 1 && (value - r.minValue) % r.step != 0)
+    {
+        std::ostringstream m;
+        m << name << " = " << value << " is not aligned to step " << r.step
+          << " (starting at " << r.minValue << ")";
+        fail(Exit::OutOfRange, m.str());
+    }
+}
 
-    // 4. Find the discrete, tunable GPU
+// =======================================================
+// GPU selection
+// =======================================================
+static IADLXGPUPtr selectGpu(IADLXSystem* sys, IADLXGPUTuningServicesPtr& tuning)
+{
     IADLXGPUListPtr gpus;
-    res = g_ADLXHelp.GetSystemServices()->GetGPUs(&gpus);
-    if (ADLX_FAILED(res) || gpus->Empty()) { g_ADLXHelp.Terminate(); return 1; }
+    require(sys->GetGPUs(&gpus), Exit::NoGpu, "Enumerating GPUs");
+    if (gpus->Empty())
+        fail(Exit::NoGpu, "ADLX reported no GPUs");
 
-    IADLXGPUPtr oneGPU;
-    IADLXGPUPtr fallbackGPU;
+    IADLXGPUPtr discrete;
+    IADLXGPUPtr fallback;
 
     for (adlx_uint i = gpus->Begin(); i != gpus->End(); ++i)
     {
@@ -58,103 +160,167 @@ int main(int argc, char* argv[])
         if (ADLX_FAILED(gpus->At(i, &gpu)) || gpu == nullptr)
             continue;
 
-        // Must actually be tunable — rules out the iGPU and any
-        // dGPU the driver won't expose manual tuning for.
+        // Must actually be tunable: rules out the iGPU and any dGPU
+        // the driver won't expose manual tuning for.
         adlx_bool tunable = false;
-        if (ADLX_FAILED(gpuTuningService->IsSupportedManualGFXTuning(gpu, &tunable)) || !tunable)
+        if (ADLX_FAILED(tuning->IsSupportedManualGFXTuning(gpu, &tunable)) || !tunable)
             continue;
 
-        if (!fallbackGPU)
-            fallbackGPU = gpu;
+        if (!fallback)
+            fallback = gpu;
 
         ADLX_GPU_TYPE type = GPUTYPE_UNDEFINED;
         if (ADLX_SUCCEEDED(gpu->Type(&type)) && type == GPUTYPE_DISCRETE)
         {
-            oneGPU = gpu;
+            discrete = gpu;
             break;
         }
     }
 
     // Some drivers report GPUTYPE_UNDEFINED; fall back to the first tunable GPU.
-    if (!oneGPU)
-        oneGPU = fallbackGPU;
+    IADLXGPUPtr chosen = discrete ? discrete : fallback;
+    if (!chosen)
+        fail(Exit::NoGpu, "No GPU with manual graphics tuning support found");
 
-    if (oneGPU == nullptr)
+    const char* name = nullptr;
+    if (ADLX_SUCCEEDED(chosen->Name(&name)) && name)
+        std::cout << "Selected GPU: " << name << std::endl;
+
+    return chosen;
+}
+
+// =======================================================
+// Main work. Every ADLX smart pointer lives inside this function,
+// so all of them are released before ADLX is terminated.
+// =======================================================
+static void run(const Targets& t)
+{
+    IADLXSystem* sys = g_ADLXHelp.GetSystemServices();
+    if (!sys)
+        fail(Exit::AdlxInit, "GetSystemServices returned null");
+
+    IADLXGPUTuningServicesPtr tuning;
+    require(sys->GetGPUTuningServices(&tuning), Exit::AdlxInit, "Getting GPU tuning services");
+
+    IADLXGPUPtr gpu = selectGpu(sys, tuning);
+
+    // ---------------------------------------------------
+    // Phase 1: acquire every interface, read every range,
+    //          validate every value. Nothing is written yet.
+    // ---------------------------------------------------
+
+    // Graphics (core clock + voltage) — RDNA-style interface required.
+    IADLXInterfacePtr gfxIfc;
+    require(tuning->GetManualGFXTuning(gpu, &gfxIfc), Exit::Unsupported, "Getting manual GFX tuning");
+    IADLXManualGraphicsTuning2Ptr gfx(gfxIfc);
+    if (!gfx)
+        fail(Exit::Unsupported, "GPU does not expose IADLXManualGraphicsTuning2 (pre-RDNA GPU?)");
+
+    // VRAM (frequency + timing)
+    adlx_bool supported = false;
+    if (ADLX_FAILED(tuning->IsSupportedManualVRAMTuning(gpu, &supported)) || !supported)
+        fail(Exit::Unsupported, "Manual VRAM tuning is not supported on this GPU");
+    IADLXInterfacePtr vramIfc;
+    require(tuning->GetManualVRAMTuning(gpu, &vramIfc), Exit::Unsupported, "Getting manual VRAM tuning");
+    IADLXManualVRAMTuning2Ptr vram(vramIfc);
+    if (!vram)
+        fail(Exit::Unsupported, "GPU does not expose IADLXManualVRAMTuning2");
+
+    adlx_bool timingSupported = false;
+    if (ADLX_FAILED(vram->IsSupportedMemoryTiming(&timingSupported)))
+        timingSupported = false;
+    if (t.fastTiming == 1 && !timingSupported)
+        fail(Exit::Unsupported, "Fast memory timing requested but not supported; remove it from the search space");
+
+    // Power
+    supported = false;
+    if (ADLX_FAILED(tuning->IsSupportedManualPowerTuning(gpu, &supported)) || !supported)
+        fail(Exit::Unsupported, "Manual power tuning is not supported on this GPU");
+    IADLXInterfacePtr powerIfc;
+    require(tuning->GetManualPowerTuning(gpu, &powerIfc), Exit::Unsupported, "Getting manual power tuning");
+    IADLXManualPowerTuningPtr power(powerIfc);
+    if (!power)
+        fail(Exit::Unsupported, "GPU does not expose IADLXManualPowerTuning");
+
+    // Ranges
+    ADLX_IntRange coreR{}, voltR{}, memR{}, powR{};
+    require(gfx->GetGPUMaxFrequencyRange(&coreR), Exit::Unsupported, "Reading core clock range");
+    require(gfx->GetGPUVoltageRange(&voltR),      Exit::Unsupported, "Reading voltage range");
+    require(vram->GetMaxVRAMFrequencyRange(&memR), Exit::Unsupported, "Reading VRAM clock range");
+    require(power->GetPowerLimitRange(&powR),     Exit::Unsupported, "Reading power limit range");
+
+    checkRange("max_gpu_freq", t.coreMHz,    coreR);
+    checkRange("voltage",      t.voltageMv,  voltR);
+    checkRange("mem_freq",     t.memMHz,     memR);
+    checkRange("power_limit",  t.powerLimit, powR);
+
+    // ---------------------------------------------------
+    // Phase 2: apply. Any failure rolls back to factory
+    //          so the next trial starts from a known state.
+    // ---------------------------------------------------
+    auto apply = [&](ADLX_RESULT r, const char* what)
     {
-        std::cerr << "[ERROR] No tunable discrete GPU found." << std::endl;
-        g_ADLXHelp.Terminate();
-        return 1;
-    }
+        if (ADLX_SUCCEEDED(r))
+            return;
 
-    const char* gpuName = nullptr;
-    if (ADLX_SUCCEEDED(oneGPU->Name(&gpuName)) && gpuName)
-        std::cout << "Selected GPU: " << gpuName << std::endl;
+        std::ostringstream m;
+        m << "Driver rejected " << what << " (ADLX_RESULT " << r << ")";
+        const Exit code = (r == ADLX_RESET_NEEDED) ? Exit::ResetNeeded : Exit::Rejected;
 
-        auto applyAndCheck = [&](ADLX_RESULT r, const char* settingName) -> bool {
-        if (r == ADLX_RESET_NEEDED) {
-            std::cerr << "[CRASH] Driver rejected " << settingName << "! Resetting to safe defaults..." << std::endl;
-            gpuTuningService->ResetToFactory(oneGPU);
-            return true;
+        ADLX_RESULT rr = tuning->ResetToFactory(gpu);
+        if (ADLX_FAILED(rr))
+        {
+            m << "; ResetToFactory ALSO failed (ADLX_RESULT " << rr << "). GPU state is unknown.";
+            fail(Exit::RollbackFailed, m.str());
         }
-        if (ADLX_FAILED(r)) {
-            std::cerr << "[ERROR] Failed to apply " << settingName << " (Code: " << r << ")" << std::endl;
-            return true;
-        }
-        return false;
+        m << "; restored factory defaults";
+        fail(code, m.str());
     };
 
-    // =======================================================
-    // A. Apply Graphics Tuning (Core Clock & Voltage)
-    // =======================================================
-    IADLXInterfacePtr gfxTuningIfc;
-    if (ADLX_SUCCEEDED(gpuTuningService->GetManualGFXTuning(oneGPU, &gfxTuningIfc)))
-    {// Using Post-Navi ASIC Interface (RDNA series)
-        IADLXManualGraphicsTuning2Ptr gfxTuning(gfxTuningIfc);
-        if (gfxTuning)
-        {
-            res = gfxTuning->SetGPUMaxFrequency(target_max_freq);
-            if (applyAndCheck(res, "Max GPU Frequency")) { g_ADLXHelp.Terminate(); return 1; }
-
-            res = gfxTuning->SetGPUVoltage(target_voltage);
-            if (applyAndCheck(res, "GPU Voltage")) { g_ADLXHelp.Terminate(); return 1; }
-        }
-    }
-
-    // =======================================================
-    // B. Apply VRAM Tuning (Memory Frequency & Timings)
-    // =======================================================
-    IADLXInterfacePtr vramTuningIfc;
-    if (ADLX_SUCCEEDED(gpuTuningService->GetManualVRAMTuning(oneGPU, &vramTuningIfc)))
+    apply(gfx->SetGPUMaxFrequency(t.coreMHz),  "max GPU frequency");
+    apply(gfx->SetGPUVoltage(t.voltageMv),     "GPU voltage");
+    apply(vram->SetMaxVRAMFrequency(t.memMHz), "VRAM frequency");
+    if (timingSupported)
     {
-        IADLXManualVRAMTuning2Ptr vramTuning(vramTuningIfc);
-        if (vramTuning)
-        {
-            res = vramTuning->SetMaxVRAMFrequency(target_mem_freq);
-            if (applyAndCheck(res, "VRAM Frequency")) { g_ADLXHelp.Terminate(); return 1; }
-
-            ADLX_MEMORYTIMING_DESCRIPTION desc = (target_mem_timing == 1) ? MEMORYTIMING_FAST_TIMING : MEMORYTIMING_DEFAULT;
-            res = vramTuning->SetMemoryTimingDescription(desc);
-            if (applyAndCheck(res, "Memory Timing")) { g_ADLXHelp.Terminate(); return 1; }
-        }
+        ADLX_MEMORYTIMING_DESCRIPTION desc = t.fastTiming ? MEMORYTIMING_FAST_TIMING : MEMORYTIMING_DEFAULT;
+        apply(vram->SetMemoryTimingDescription(desc), "memory timing");
     }
+    apply(power->SetPowerLimit(t.powerLimit), "power limit");
+}
 
-    // =======================================================
-    // C. Apply Power Tuning (Power Limit)
-    // =======================================================
-    IADLXInterfacePtr powerTuningIfc;
-    if (ADLX_SUCCEEDED(gpuTuningService->GetManualPowerTuning(oneGPU, &powerTuningIfc)))
+// =======================================================
+// the only place that turns errors into exit codes.
+// =======================================================
+int main(int argc, char* argv[])
+{
+    try
     {
-        IADLXManualPowerTuningPtr powerTuning(powerTuningIfc);
-        if (powerTuning)
-        {
-            res = powerTuning->SetPowerLimit(target_power_limit);
-            if (applyAndCheck(res, "Power Limit")) { g_ADLXHelp.Terminate(); return 1; }
-        }
+        const Targets t = parseArgs(argc, argv);
+
+        std::cout << "Target -> Core: " << t.coreMHz << "MHz, VRAM: " << t.memMHz
+                  << "MHz, Timing: " << (t.fastTiming ? "Fast" : "Default")
+                  << ", Power: " << t.powerLimit << ", Voltage: " << t.voltageMv << "mV" << std::endl;
+
+        if (ADLX_FAILED(g_ADLXHelp.Initialize()))
+            fail(Exit::AdlxInit, "ADLX failed to initialize (AMD driver missing or too old?)");
+
+        // Terminates ADLX exactly once, on success or on any throw,
+        // after run()'s ADLX pointers have already been released.
+        struct AdlxSession { ~AdlxSession() { g_ADLXHelp.Terminate(); } } session;
+
+        run(t);
+
+        std::cout << "[SUCCESS] All parameters applied." << std::endl;
+        return static_cast<int>(Exit::Ok);
     }
-
-    // 5. Clean Exit
-    std::cout << "[SUCCESS] All parameters applied gracefully." << std::endl;
-    g_ADLXHelp.Terminate();
-
-    return 0; // Return 0 back to brain.py so Optuna knows it's time to run the benchmark
+    catch (const TuneError& e)
+    {
+        std::cerr << "[FAIL " << static_cast<int>(e.code) << "] " << e.msg << std::endl;
+        return static_cast<int>(e.code);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FAIL " << static_cast<int>(Exit::Internal) << "] Unexpected exception: " << e.what() << std::endl;
+        return static_cast<int>(Exit::Internal);
+    }
 }
