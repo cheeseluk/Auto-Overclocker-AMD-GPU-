@@ -172,17 +172,41 @@ def check_previous_crash(study, settings):
 # ==========================================
 # --- MODULE 3: BENCHMARKING ---
 # ==========================================
+def _is_finite_number(v):
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+
+
 def run_benchmark(label):
+    """Run the benchmark once and turn its (avg_fps, min_fps) result into a single score.
+
+    run_cyberpunk2077() handles crashes, hangs, a missing executable and missing/bad
+    telemetry itself and reports all of them as (0.0, 0.0), so that tuple is treated
+    as a failed run.
+    """
     try:
-        score = run_cyberpunk2077()
+        result = run_cyberpunk2077()
     except (FileNotFoundError, PermissionError) as e:
         # The harness can't even start: not the GPU settings' fault.
         raise FatalError(f"Benchmark harness error during {label} run: {e}") from e
     except Exception as e:
         raise BenchmarkFailed(f"{label} run failed: {e!r}") from e
 
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or score <= 0:
-        raise BenchmarkFailed(f"{label} run returned an invalid score: {score!r}")
+    if not isinstance(result, (tuple, list)) or len(result) != 2:
+        raise BenchmarkFailed(f"{label} run returned {result!r}, expected (avg_fps, min_fps)")
+    avg_fps, min_fps = result
+
+    if not (_is_finite_number(avg_fps) and _is_finite_number(min_fps)):
+        raise BenchmarkFailed(f"{label} run returned non-numeric FPS values: {result!r}")
+
+    if avg_fps == 0 and min_fps == 0:
+        raise BenchmarkFailed(f"{label} run crashed, hung, or produced no telemetry (0, 0)")
+
+    if avg_fps <= 0 or min_fps < 0 or min_fps > avg_fps:
+        raise BenchmarkFailed(f"{label} run returned implausible FPS values: "
+                              f"avg={avg_fps!r}, min={min_fps!r}")
+
+    # Same stability-penalized metric as the harness: average FPS minus half the dip to the minimum.
+    score = avg_fps - (avg_fps - min_fps) / 2.0
     return float(score)
 
 

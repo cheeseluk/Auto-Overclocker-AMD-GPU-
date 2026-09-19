@@ -17,6 +17,20 @@ def run_cyberpunk2077():
     # Standard Windows AppData path for Cyberpunk local telemetry files
     bench_dir = os.path.expandvars(config["paths"]["bench_dir"])
 
+    # --- 0. VERIFY THE GAME IS WHERE CONFIG SAYS IT IS ---
+    # These are setup errors, not overclock instability, so they are raised instead of
+    # returned as (0.0, 0.0). brain.py treats FileNotFoundError as fatal and stops the run.
+    if not os.path.isfile(executable):
+        raise FileNotFoundError(
+            f"Cyberpunk 2077 executable not found at '{executable}'. "
+            f"Check 'paths.cp2077_exe' in config.json."
+        )
+    if not os.path.isdir(working_dir):
+        raise FileNotFoundError(
+            f"Cyberpunk 2077 working directory not found at '{working_dir}'. "
+            f"Check 'paths.cp2077_dir' in config.json."
+        )
+
     # --- 1. PURGE OLD LOGS ---
     print("Clearing out stale benchmark logs...")
     if os.path.exists(bench_dir):
@@ -50,9 +64,8 @@ def run_cyberpunk2077():
     except subprocess.TimeoutExpired:
         print("Overclock Failure: Engine hung up or frozen during rendering pass (Timeout).")
         return (0.0, 0.0)
-    except FileNotFoundError:
-        print(f"Configuration Error: '{executable}' was not found.")
-        return (0.0, 0.0)
+    # FileNotFoundError / PermissionError from launching are deliberately NOT caught here:
+    # they mean the setup is broken, and brain.py stops with a clear fatal error.
 
     # --- 3. SAFETY THERMAL & MEMORY FLUSH COOLDOWN ---
     print("Benchmark complete. Process terminated cleanly.")
